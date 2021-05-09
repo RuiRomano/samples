@@ -129,7 +129,6 @@ namespace TracePost
 
             trace.Start();
 
-
             /**************************************************************************
                 Create an infinite loop that runs every 5 second to check for items
                 store in the myQ queue. Post results in batches to the Power BI streaming 
