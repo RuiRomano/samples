@@ -19,7 +19,10 @@ namespace TracePost
         static HttpClient client = new HttpClient();
         static int BatchSleepTime = 5000;
         static int rowsPerPost = 500;
-        private const string connectionString = "[ENTER EVENTHUB ENDPOINT HERE IF USING STREAMING DATAFLOW]";
+        private const string eventHubConnectionString = "[ENTER EVENTHUB ENDPOINT HERE IF USING STREAMING DATAFLOW]";
+        private const string databaseToTrace = "[ENTER POWER BI STREAMING API KEY HERE]";
+        // eg. Data source=powerbi://api.powerbi.com/v1.0/myorg/Trace Post Demo;Initial catalog=AdventureWorksDW;
+        // eg. asazure://aspaaseastus2.asazure.windows.net/instancenamehere:rw
         private const string eventHubName = "tracepost";
         static string PowerBIAPI = "[ENTER STREAMING DATAFLOW API KEY HERE]";
 
@@ -43,7 +46,7 @@ namespace TracePost
                     This should enable MFA popup
             **************************************************************************/
 
-            server.Connect("Data source=powerbi://api.powerbi.com/v1.0/myorg/Trace Post Demo;Initial catalog=AdventureWorksDW;");
+            server.Connect(databaseToTrace);
             _sessionId = server.SessionID;
 
             /**************************************************************************
@@ -281,7 +284,7 @@ namespace TracePost
                 Only use if sending data to Azure EventHub
             **************************************************************************/
 
-            EventHubProducerClient producer = new EventHubProducerClient(connectionString, eventHubName);
+            EventHubProducerClient producer = new EventHubProducerClient(eventHubConnectionString, eventHubName);
 
             try
             {
