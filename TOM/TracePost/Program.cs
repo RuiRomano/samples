@@ -20,7 +20,7 @@ namespace TracePost
         static int BatchSleepTime = 5000;
         static int rowsPerPost = 500;
         private const string eventHubConnectionString = "[ENTER EVENTHUB ENDPOINT HERE IF USING STREAMING DATAFLOW]";
-        private const string databaseToTrace = "[ENTER POWER BI STREAMING API KEY HERE]";
+        private const string databaseToTrace = "[ENTER CONNECTIONSTRING OF DATABASE TO BE TRACED]";
         // eg. Data source=powerbi://api.powerbi.com/v1.0/myorg/Trace Post Demo;Initial catalog=AdventureWorksDW;
         // eg. asazure://aspaaseastus2.asazure.windows.net/instancenamehere:rw
         private const string eventHubName = "tracepost";
@@ -293,6 +293,11 @@ namespace TracePost
                 BinaryData eventBody = new BinaryData(message);
                 EventData eventData = new EventData(eventBody);
 
+                if (!eventBatch.TryAdd(eventData))
+                {
+                    throw new Exception("The first event could not be added.");
+                }
+                
                 await producer.SendAsync(eventBatch);
             }
             finally
