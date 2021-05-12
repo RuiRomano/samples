@@ -8,7 +8,11 @@ using System.Threading.Tasks;
 using System.Collections;
 using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
-
+using Microsoft.Identity.Client;
+using System.IO;
+using System.Linq;
+using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
 
 namespace TracePost
 {
@@ -20,23 +24,31 @@ namespace TracePost
         static int BatchSleepTime = 5000;
         static int rowsPerPost = 500;
         private const string eventHubConnectionString = "[ENTER EVENTHUB ENDPOINT HERE IF USING STREAMING DATAFLOW]";
-        private const string databaseToTrace = "[ENTER CONNECTIONSTRING OF DATABASE TO BE TRACED]";
+        private const string databaseToTrace = "[ENTER CONNECTION STRING]";
         // eg. Data source=powerbi://api.powerbi.com/v1.0/myorg/Trace Post Demo;Initial catalog=AdventureWorksDW;
         // eg. asazure://aspaaseastus2.asazure.windows.net/instancenamehere:rw
-        private const string eventHubName = "tracepost";
-        static string PowerBIAPI = "[ENTER STREAMING DATAFLOW API KEY HERE]";
+        private const string workspaceName = "[ENTER WORKSPASCE NAME HERE]";
 
+        private const string pushDatasetName = "ASTracePushDataset";
+        private const string pushDatasetTableName = "Trace";
+        private const string eventHubName = "tracepost";
+        
+        static string workspaceId;
+        static string pushDatasetId;
+
+        static PBIHTTPHelper pbiHttpHelper;
         static Queue myQ = new Queue();
 
 
         static void Main(string[] args)
         {
+            pbiHttpHelper = new PBIHTTPHelper(interactiveLogin: true);
+            
+            EnsurePBIPushDataSet().Wait();     
 
             Server server = new Server();
-            Console.CursorVisible = false;
-            Boolean activityFound = false;
-            string jsonString;
-            string row;
+            Console.CursorVisible = false;           
+            
             int rowsProcessed = 0;
 
             /**************************************************************************
@@ -146,35 +158,26 @@ namespace TracePost
                     Pause for 5 seconds
                 **************************************************************************/
 
-                Thread.Sleep(BatchSleepTime);
-                activityFound = false;
-
-                /**************************************************************************
-                    Start building JSON string to post data to Power BI
-                **************************************************************************/
-
-                jsonString = "{\"rows\": [";
+                Thread.Sleep(BatchSleepTime);                
 
                 /**************************************************************************
                     Create a batch of rows from the myQ queue
                 **************************************************************************/
+                var rowsToSend = new List<myTraceEvent>();
 
                 for (int i = 0; i < rowsPerPost && myQ.Count > 0; i++)
-                {
-                    activityFound = true;
-                    row = myQ.Dequeue().ToString();
-                    jsonString += $"{row},";
+                {                   
+                    rowsToSend.Add((myTraceEvent)myQ.Dequeue());
                     rowsProcessed++;
-                }
-                jsonString += "]}";
+                }                
 
                 /**************************************************************************
                     If there were items in the queue send them to Power BI now
                 **************************************************************************/
 
-                if (activityFound)
+                if (rowsToSend.Count != 0)
                 {
-                    Task<HttpResponseMessage> postToPowerBI = HttpPostAsync(PowerBIAPI, jsonString);
+                    SendToPBIDataset(rowsToSend).Wait();                    
                 }
 
                 /**************************************************************************
@@ -235,9 +238,9 @@ namespace TracePost
                         SessionID = e.SessionID,
                         IntegerData = e.IntegerData
                     };
-                    string jsonString = $"{JsonConvert.SerializeObject(m)}";
+                    //string jsonString = $"{JsonConvert.SerializeObject(m)}";
 
-                    myQ.Enqueue(jsonString);
+                    myQ.Enqueue(m);
                     //SendToEventHub(jsonString);
                 }
 
@@ -254,7 +257,7 @@ namespace TracePost
 
                     string objectName = $"{myTableName}";
                     if (myTableName.ToUpper() != myParitionName.ToUpper() && myParitionName.ToUpper() != "PARTITION") { objectName += $":{myParitionName}"; }
-                  
+
                     myTraceEvent m = new myTraceEvent
                     {
                         CurrentTime = e.CurrentTime,
@@ -269,10 +272,8 @@ namespace TracePost
                         SessionID = e.SessionID,
                         IntegerData = e.IntegerData
                     };
-                    string jsonString = $"{JsonConvert.SerializeObject(m)}";
 
-                    myQ.Enqueue(jsonString);
-                    //SendToEventHub(jsonString);
+                    myQ.Enqueue(m);
 
                 }
             }
@@ -297,7 +298,7 @@ namespace TracePost
                 {
                     throw new Exception("The first event could not be added.");
                 }
-                
+
                 await producer.SendAsync(eventBatch);
             }
             finally
@@ -306,6 +307,172 @@ namespace TracePost
             }
         }
 
+        static async Task SendToPBIDataset(List<myTraceEvent> events)
+        {      
+             var pushRowsObj = new JObject(new JProperty("rows"
+                , JArray.FromObject(events)
+                
+            ));
+
+            await pbiHttpHelper.ExecutePBIRequest($"datasets/{pushDatasetId}/tables/{pushDatasetTableName}/rows"
+                , HttpMethod.Post
+                , CancellationToken.None
+                , body: pushRowsObj.ToString(Newtonsoft.Json.Formatting.None)
+                , groupId: workspaceId
+            );
+        }
+
+        static async Task EnsurePBIPushDataSet()
+        {
+            var workspaces = await pbiHttpHelper.ExecutePBIRequest("groups", HttpMethod.Get, CancellationToken.None);
+
+            var workspace = workspaces.Data.FirstOrDefault(s => s["name"].Value<string>() == workspaceName);
+
+            if (workspace == null)
+            {
+                Console.WriteLine($"Creating workspace: '{workspaceName}'");
+                                
+                var workspaceResponse = await pbiHttpHelper.ExecutePBIRequest("groups", HttpMethod.Post
+                    , CancellationToken.None
+                    , body: new JObject(new JProperty("name", workspaceName)).ToString(Newtonsoft.Json.Formatting.None));
+
+                if (workspaceResponse.Data == null)
+                {
+                    throw new Exception("Cannot create workspace");
+                }
+
+                workspace = workspaceResponse.Data;
+            }
+
+            workspaceId = workspace["id"].Value<string>();
+
+            var datasets = await pbiHttpHelper.ExecutePBIRequest("datasets", HttpMethod.Get, CancellationToken.None, groupId: workspaceId);
+            
+            var dataset = datasets.Data.FirstOrDefault(s => s["name"].Value<string>() == pushDatasetName);
+            
+            if (dataset != null)
+            {
+                Console.WriteLine("Dataset already exists");
+                pushDatasetId = dataset["id"].Value<string>();
+                return;
+            }
+
+            var pbiJsonObj = new JObject(
+                new JProperty("name", pushDatasetName)
+                ,
+                new JProperty("tables",
+                    new JArray(
+                        new JObject(
+                            new JProperty("name", pushDatasetTableName)
+                            ,
+                            new JProperty("measures",
+                                new JArray(
+                                    new JObject(
+                                        new JProperty("name", "Avg. Duration")
+                                        ,
+                                        new JProperty("expression", $"AVERAGE('{pushDatasetTableName}'[Duration])")
+                                        ,
+                                        new JProperty("formatString", "0.00")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "# Traces")
+                                        ,
+                                        new JProperty("expression", $"COUNTROWS('{pushDatasetTableName}')")
+                                        ,
+                                        new JProperty("formatString", "0.00")
+                                    )
+                                )
+                            )
+                            ,
+                            new JProperty("columns"
+                                ,
+                                new JArray(
+                                    new JObject(
+                                        new JProperty("name", "CurrentTime")
+                                        ,
+                                        new JProperty("dataType", "DateTime")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "ObjectName")
+                                        ,
+                                        new JProperty("dataType", "String")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "SessionID")
+                                        ,
+                                        new JProperty("dataType", "String")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "ObjectID")
+                                        ,
+                                        new JProperty("dataType", "String")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "Duration")
+                                        ,
+                                        new JProperty("dataType", "Int64")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "EventSubClass")
+                                        ,
+                                        new JProperty("dataType", "string")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "DatabaseName")
+                                        ,
+                                        new JProperty("dataType", "string")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "StartTime")
+                                        ,
+                                        new JProperty("dataType", "DateTime")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "EndTime")
+                                        ,
+                                        new JProperty("dataType", "DateTime")
+                                    )
+                                     ,
+                                    new JObject(
+                                        new JProperty("name", "EventClass")
+                                        ,
+                                        new JProperty("dataType", "String")
+                                    )
+                                    ,
+                                    new JObject(
+                                        new JProperty("name", "IntegerData")
+                                        ,
+                                        new JProperty("dataType", "Int64")
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            );
+
+            var response = await pbiHttpHelper.ExecutePBIRequest("datasets"
+                , HttpMethod.Post, CancellationToken.None
+                , groupId: workspaceId
+                , body: pbiJsonObj.ToString(Newtonsoft.Json.Formatting.None)
+                );
+
+            if (response.HttpError != null)
+            {                
+                throw new Exception("Error ensuring PBI PUSH Dataset");
+            }
+
+            pushDatasetId = response.Data["id"].Value<string>();
+        }
 
         public class myTraceEvent
         {
@@ -321,15 +488,6 @@ namespace TracePost
             public long IntegerData { get; set; }
             public string SessionID { get; set; }
 
-        }
-
-        static async Task<HttpResponseMessage> HttpPostAsync(string url, string data)
-        {
-            // Construct an HttpContent object from StringContent
-            HttpContent content = new StringContent(data);
-            HttpResponseMessage response = await client.PostAsync(url, content);
-            response.EnsureSuccessStatusCode();
-            return response;
         }
     }
 }
